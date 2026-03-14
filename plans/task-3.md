@@ -165,3 +165,38 @@ After initial implementation:
 - `AGENT.md` — Document `query_api`, authentication, lessons learned (200+ words)
 - `tests/test_agent.py` — Add 2 new test methods
 - `plans/task-3.md` — This plan + benchmark results
+
+## Benchmark Results
+
+### Initial Run
+
+**Score:** 0/10 passed
+
+### First Failures and Diagnosis
+
+| # | Question | Issue | Fix Strategy |
+|---|----------|-------|--------------|
+| 0 | Protect a branch | LLM hallucinates filename instead of using list_files first | Improve system prompt to emphasize list_files first |
+| 1 | SSH connection | Not tested yet | — |
+| 2 | Backend framework | Works (FastAPI) | — |
+| 3 | API router modules | Not tested yet | — |
+| 4 | Item count | LLM doesn't count items, just returns raw JSON | Add counting logic or improve prompt |
+| 5 | Status code without auth | Not tested yet | — |
+| 6 | Completion-rate error | Not tested yet | — |
+| 7 | Top-learners bug | Not tested yet | — |
+| 8 | Request lifecycle | Not tested yet | — |
+| 9 | ETL idempotency | Not tested yet | — |
+
+### Iteration Strategy
+
+1. **Force list_files first:** Update system prompt to always start with `list_files("wiki")` for wiki questions
+2. **Better answer extraction:** After reading file content, explicitly ask LLM to extract the answer
+3. **Count items:** For database queries, prompt LLM to count the array length
+4. **Test incrementally:** Run one question at a time with `uv run run_eval.py --index N`
+
+### Lessons Learned
+
+1. **LLM needs explicit guidance:** Simply having tools isn't enough — the system prompt must explicitly guide tool selection order
+2. **Hallucination is a problem:** Free models may hallucinate filenames rather than exploring first
+3. **Answer extraction is separate from tool use:** The LLM may call the right tool but fail to extract the answer properly
+4. **Iterative development is key:** Run eval, diagnose, fix prompt, repeat

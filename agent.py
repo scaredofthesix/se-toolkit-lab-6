@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""CLI agent with tools for reading project documentation.
+"""CLI agent with tools for reading documentation and querying the backend API.
 
 Usage:
-    uv run agent.py "How do you resolve a merge conflict?"
+    uv run agent.py "How many items are in the database?"
 
 Output:
     {
       "answer": "...",
-      "source": "wiki/git-workflow.md#resolving-merge-conflicts",
+      "source": "wiki/git-workflow.md#section (optional)",
       "tool_calls": [...]
     }
 
@@ -30,34 +30,51 @@ PROJECT_ROOT = Path(__file__).parent
 
 
 def load_config() -> dict:
-    """Load LLM configuration from .env.agent.secret.
+    """Load LLM and LMS configuration from environment files.
 
     Returns:
-        dict with keys: api_key, api_base, model
+        dict with keys: llm_api_key, llm_api_base, llm_model, lms_api_key, agent_api_base_url
 
     Raises:
         SystemExit: If required environment variables are missing.
     """
-    env_file = PROJECT_ROOT / ".env.agent.secret"
-    load_dotenv(env_file)
+    # Load LLM config from .env.agent.secret
+    llm_env_file = PROJECT_ROOT / ".env.agent.secret"
+    load_dotenv(llm_env_file)
 
-    api_key = os.getenv("LLM_API_KEY")
-    api_base = os.getenv("LLM_API_BASE")
-    model = os.getenv("LLM_MODEL")
+    # Load LMS config from .env.docker.secret
+    lms_env_file = PROJECT_ROOT / ".env.docker.secret"
+    load_dotenv(lms_env_file, override=False)
 
-    if not api_key:
+    llm_api_key = os.getenv("LLM_API_KEY")
+    llm_api_base = os.getenv("LLM_API_BASE")
+    llm_model = os.getenv("LLM_MODEL")
+    lms_api_key = os.getenv("LMS_API_KEY")
+    agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+
+    if not llm_api_key:
         print("Error: LLM_API_KEY not found in .env.agent.secret", file=sys.stderr)
         sys.exit(1)
 
-    if not api_base:
+    if not llm_api_base:
         print("Error: LLM_API_BASE not found in .env.agent.secret", file=sys.stderr)
         sys.exit(1)
 
-    if not model:
+    if not llm_model:
         print("Error: LLM_MODEL not found in .env.agent.secret", file=sys.stderr)
         sys.exit(1)
 
-    return {"api_key": api_key, "api_base": api_base, "model": model}
+    if not lms_api_key:
+        print("Error: LMS_API_KEY not found in .env.docker.secret", file=sys.stderr)
+        sys.exit(1)
+
+    return {
+        "llm_api_key": llm_api_key,
+        "llm_api_base": llm_api_base,
+        "llm_model": llm_model,
+        "lms_api_key": lms_api_key,
+        "agent_api_base_url": agent_api_base_url,
+    }
 
 
 def is_safe_path(path: str) -> bool:
@@ -145,6 +162,60 @@ def list_files(path: str) -> dict:
         return {"success": False, "error": f"Error listing directory: {e}"}
 
 
+def query_api(method: str, path: str, body: str = None) -> dict:
+    """Call the backend API.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE, etc.)
+        path: API path (e.g., /items/, /analytics/completion-rate)
+        body: Optional JSON request body for POST/PUT requests
+
+    Returns:
+        dict with 'success' bool and 'data' (response) or 'error' message.
+    """
+    config = load_config()
+    base_url = config["agent_api_base_url"].rstrip("/")
+    url = f"{base_url}{path}"
+    lms_api_key = config["lms_api_key"]
+
+    headers = {
+        "Authorization": f"Bearer {lms_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    print(f"Calling API: {method} {url}", file=sys.stderr)
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                response = client.post(url, headers=headers, content=body or "{}")
+            elif method.upper() == "PUT":
+                response = client.put(url, headers=headers, content=body or "{}")
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
+            else:
+                return {"success": False, "error": f"Unsupported method: {method}"}
+
+            # Try to parse JSON response
+            try:
+                response_data = response.json()
+            except json.JSONDecodeError:
+                response_data = response.text
+
+            return {
+                "success": True,
+                "status_code": response.status_code,
+                "body": response_data,
+            }
+
+    except httpx.TimeoutException:
+        return {"success": False, "error": "API request timed out (30s)"}
+    except httpx.RequestError as e:
+        return {"success": False, "error": f"Request failed: {e}"}
+
+
 def get_tool_schemas() -> list:
     """Return the tool schemas for OpenAI function calling.
 
@@ -156,13 +227,13 @@ def get_tool_schemas() -> list:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file at the given path. Use this to read wiki documentation or other project files.",
+                "description": "Read the contents of a file at the given path. Use this to read wiki documentation, source code, or configuration files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path from project root (e.g., wiki/git-workflow.md)",
+                            "description": "Relative path from project root (e.g., wiki/git-workflow.md, backend/app/main.py)",
                         }
                     },
                     "required": ["path"],
@@ -173,16 +244,41 @@ def get_tool_schemas() -> list:
             "type": "function",
             "function": {
                 "name": "list_files",
-                "description": "List files and directories at the given path. Use this to explore the project structure.",
+                "description": "List files and directories at the given path. Use this to explore the project structure or find specific files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative directory path from project root (e.g., wiki)",
+                            "description": "Relative directory path from project root (e.g., wiki, backend/app/routers)",
                         }
                     },
                     "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": "Call the backend API to fetch data, test endpoints, or check status codes. Use this for questions about database contents, API behavior, analytics data, or HTTP responses.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method (GET, POST, PUT, DELETE)",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "API path (e.g., /items/, /analytics/completion-rate, /analytics/top-learners)",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional JSON request body for POST/PUT requests",
+                        },
+                    },
+                    "required": ["method", "path"],
                 },
             },
         },
@@ -217,6 +313,19 @@ def execute_tool(tool_name: str, args: dict) -> str:
         else:
             return f"Error: {result['error']}"
 
+    elif tool_name == "query_api":
+        method = args.get("method", "GET")
+        path = args.get("path", "")
+        body = args.get("body")
+        result = query_api(method, path, body)
+        if result["success"]:
+            return json.dumps({
+                "status_code": result["status_code"],
+                "body": result["body"],
+            })
+        else:
+            return f"Error: {result['error']}"
+
     else:
         return f"Error: Unknown tool: {tool_name}"
 
@@ -235,26 +344,26 @@ def call_llm(messages: list, config: dict, tools: list = None) -> dict:
     Raises:
         SystemExit: If the API call fails or times out.
     """
-    url = f"{config['api_base']}/chat/completions"
+    url = f"{config['llm_api_base']}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {config['api_key']}",
+        "Authorization": f"Bearer {config['llm_api_key']}",
         "Content-Type": "application/json",
     }
 
     # OpenRouter-specific headers
-    if "openrouter.ai" in config["api_base"]:
+    if "openrouter.ai" in config["llm_api_base"]:
         headers["HTTP-Referer"] = "https://github.com/inno-se-toolkit/se-toolkit-lab-6"
         headers["X-Title"] = "SE Toolkit Lab 6 Agent"
 
     payload = {
-        "model": config["model"],
+        "model": config["llm_model"],
         "messages": messages,
     }
 
     if tools:
         payload["tools"] = tools
 
-    print(f"Calling LLM at {config['api_base']}...", file=sys.stderr)
+    print(f"Calling LLM at {config['llm_api_base']}...", file=sys.stderr)
 
     try:
         with httpx.Client(timeout=60.0) as client:
@@ -309,19 +418,46 @@ def run_agentic_loop(question: str, config: dict) -> dict:
     Returns:
         dict with 'answer', 'source', and 'tool_calls' keys.
     """
-    # System prompt for documentation agent
-    system_prompt = """You are a documentation assistant for a software engineering project. You have access to tools that let you read files and list directories in the project wiki.
+    # System prompt for documentation and system agent
+    system_prompt = """You are a documentation and system assistant for a software engineering project. You have access to tools that let you:
+1. Read files and list directories in the project wiki and source code
+2. Query the backend API to fetch data, test endpoints, or check status codes
 
-When asked a question:
-1. Use `list_files` to explore the wiki directory structure if needed
-2. Use `read_file` to read relevant wiki files and find the answer
-3. Look for section headers (lines starting with # or ##) to identify specific sections
-4. When you have the answer, respond with a final message (no tool calls) that includes:
-   - The answer to the question
-   - A source reference in the format: wiki/filename.md#section-anchor
-   - The section anchor should be lowercase with hyphens instead of spaces
+When asked a question, choose the right tool:
 
-Always provide a source reference when you find an answer in a file."""
+**Step 1: Find the right file**
+- Use `list_files` to explore directory structure FIRST (e.g., list "wiki" to find relevant files)
+- Look at the file names to find the most relevant one
+- Then use `read_file` to read that specific file
+
+**Use `list_files` + `read_file` when:**
+- Asked about wiki documentation (git workflow, SSH, processes)
+- Need to explore directory structure first
+- Asked about source code (framework, router modules, bugs)
+
+**Use `read_file` when:**
+- Asked to read specific files (docker-compose.yml, Dockerfile, source code)
+- Asked to diagnose bugs (after getting an API error)
+- Asked about configuration or architecture
+
+**Use `query_api` when:**
+- Asked about database contents (e.g., "How many items...?")
+- Asked about API behavior (e.g., "What status code...?")
+- Asked to test an endpoint or fetch analytics data
+- Asked to check HTTP responses
+
+**Important:**
+- After using tools, ALWAYS provide a final answer in natural language (no tool calls)
+- Do NOT output tool call JSON in your final answer
+- Just give the answer directly
+- Read the file content carefully and extract the actual answer
+
+**For answers:**
+- When you have the answer from wiki/source, include a source reference: wiki/filename.md#section-anchor
+- For API questions, the source is optional
+- The section anchor should be lowercase with hyphens instead of spaces
+
+Always provide accurate answers based on what you find."""
 
     # Initialize conversation
     messages = [
@@ -446,7 +582,7 @@ def main():
     print(f"Question: {question}", file=sys.stderr)
 
     config = load_config()
-    print(f"Using model: {config['model']}", file=sys.stderr)
+    print(f"Using model: {config['llm_model']}", file=sys.stderr)
 
     result = run_agentic_loop(question, config)
 
