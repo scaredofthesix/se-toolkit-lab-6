@@ -79,7 +79,19 @@ def tool_query_api(method: str, path: str, body: str | None = None, authenticate
     try:
         with httpx.Client(timeout=15) as client:
             resp = client.request(method, url, headers=headers, content=body if body else None)
-            return json.dumps({"status_code": resp.status_code, "body": resp.text[:5000]})
+            body_text = resp.text[:5000]
+            # For JSON responses that are arrays, add array_length hint
+            try:
+                data = resp.json()
+                if isinstance(data, list):
+                    return json.dumps({
+                        "status_code": resp.status_code,
+                        "body": body_text,
+                        "array_length": len(data)
+                    })
+                return json.dumps({"status_code": resp.status_code, "body": body_text})
+            except json.JSONDecodeError:
+                return json.dumps({"status_code": resp.status_code, "body": body_text})
     except Exception as e:
         return json.dumps({"status_code": 0, "body": f"Error: {e}"})
 
@@ -124,7 +136,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Send an HTTP request to the deployed backend LMS API. Use this for data queries (item counts, scores, analytics) and system status checks. The API is at the base URL with endpoints like /items/, /analytics/completion-rate, etc. By default requests are authenticated with the API key. Set authenticated=false to test unauthenticated behavior.",
+            "description": "Send an HTTP request to the deployed backend LMS API. Use this for data queries (item counts, scores, analytics) and system status checks. Returns JSON with status_code and body. For list endpoints like /items/, the body contains an array — count the array length to answer 'how many' questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -176,9 +188,14 @@ You are a helpful agent for a Learning Management Service (LMS) project. You ans
 1. Wiki/documentation questions → read_file the exact wiki file from the topic map above. Set "source" to the wiki file path (e.g., "wiki/docker.md#clean-up-docker").
 2. "Read the [file]" questions → read_file that specific file directly (e.g., "Read the Dockerfile" → read_file("Dockerfile")).
 3. Codebase/architecture questions → read_file on the relevant source files.
-4. Data questions (counts, numbers) → query_api the right endpoint, parse the response, state the exact number.
+4. Data questions (counts, numbers) → query_api the right endpoint, then COUNT the array length in the response. For "How many items?" use GET /items/ and count the returned array length. State the exact number.
 5. Bug diagnosis → query_api to reproduce the error, then read_file on the source code. Check ALL endpoints in that file.
 6. Comparison/reasoning questions → read the relevant source files, then give a structured answer.
+
+## Important: After getting API response with an array
+- If the response body contains an array (e.g., from /items/, /learners/, /interactions/), COUNT the array length and state the number.
+- Do NOT make additional tool calls after receiving the array — you have the answer.
+- Example: GET /items/ returns [{"id":1,...}, {"id":2,...}, ...] → count items and answer "There are N items."
 
 ## Bug Detection Checklist
 When asked about bugs or risky operations in code, systematically check for:
