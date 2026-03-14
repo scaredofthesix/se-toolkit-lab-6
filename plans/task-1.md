@@ -3,13 +3,13 @@
 ## LLM Provider Choice
 
 **Provider:** OpenRouter
-**Model:** openrouter/free (auto-routes to available free models)
+**Model:** `meta-llama/llama-3.3-70b-instruct:free`
 **Why:**
 
 - Works from Russia without VPN
 - No credit card required
-- Multiple free models available
-- Automatic fallback if one model is overloaded
+- Free tier with 50 requests/day
+- Strong model for general knowledge questions
 
 ## Architecture
 
