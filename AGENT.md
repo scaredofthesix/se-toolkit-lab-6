@@ -7,12 +7,13 @@ This agent is a simple CLI that connects to an LLM API, sends a user question, a
 ## LLM Provider
 
 **Provider:** OpenRouter  
-**Model:** `openrouter/free` (auto-routes to available free models)  
+**Model:** `meta-llama/llama-3.3-70b-instruct:free`  
 **Why OpenRouter?**
 
 - Works from Russia without VPN
 - No credit card required
-- Multiple free models available with automatic fallback
+- Free tier with 50 requests/day
+- Strong model for general knowledge questions
 
 ## Architecture
 
