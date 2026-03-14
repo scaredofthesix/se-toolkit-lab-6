@@ -66,3 +66,59 @@ class TestAgentOutput:
 
         # Check answer is not empty
         assert len(data["answer"].strip()) > 0, "'answer' field is empty"
+
+
+class TestDocumentationAgent:
+    """Test suite for documentation agent with tool calling."""
+
+    def test_agent_uses_read_file_for_merge_conflict_question(self):
+        """Test that agent uses read_file tool when asked about merge conflicts."""
+        question = "How do you resolve a merge conflict?"
+
+        returncode, stdout, stderr = run_agent(question)
+
+        # Check exit code
+        assert returncode == 0, f"Agent exited with code {returncode}, stderr: {stderr}"
+
+        # Check stdout is valid JSON
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"Agent output is not valid JSON: {stdout[:200]}. Error: {e}")
+
+        # Check required fields exist
+        assert "answer" in data, f"Missing 'answer' field in output: {stdout[:200]}"
+        assert "tool_calls" in data, f"Missing 'tool_calls' field in output: {stdout[:200]}"
+
+        # Check that read_file was used
+        tool_names = [tc.get("tool", "") for tc in data["tool_calls"]]
+        assert "read_file" in tool_names, f"Expected 'read_file' in tool calls, got: {tool_names}"
+
+        # Check that source or answer references a wiki file about merge conflicts
+        source = data.get("source", "")
+        answer = data.get("answer", "")
+        combined = f"{source} {answer}".lower()
+        assert "merge" in combined and "conflict" in combined, f"Expected 'merge conflict' in source or answer, got: source='{source}', answer='{answer[:100]}'"
+
+    def test_agent_uses_list_files_for_wiki_exploration_question(self):
+        """Test that agent uses list_files tool when asked about wiki contents."""
+        question = "What files are in the wiki?"
+
+        returncode, stdout, stderr = run_agent(question)
+
+        # Check exit code
+        assert returncode == 0, f"Agent exited with code {returncode}, stderr: {stderr}"
+
+        # Check stdout is valid JSON
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"Agent output is not valid JSON: {stdout[:200]}. Error: {e}")
+
+        # Check required fields exist
+        assert "answer" in data, f"Missing 'answer' field in output: {stdout[:200]}"
+        assert "tool_calls" in data, f"Missing 'tool_calls' field in output: {stdout[:200]}"
+
+        # Check that list_files was used
+        tool_names = [tc.get("tool", "") for tc in data["tool_calls"]]
+        assert "list_files" in tool_names, f"Expected 'list_files' in tool calls, got: {tool_names}"
