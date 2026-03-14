@@ -79,19 +79,21 @@ def tool_query_api(method: str, path: str, body: str | None = None, authenticate
     try:
         with httpx.Client(timeout=15) as client:
             resp = client.request(method, url, headers=headers, content=body if body else None)
-            body_text = resp.text[:5000]
-            # For JSON responses that are arrays, add array_length hint
             try:
                 data = resp.json()
                 if isinstance(data, list):
+                    # For arrays: return the count clearly + a small preview
+                    preview = data[:3]
                     return json.dumps({
                         "status_code": resp.status_code,
-                        "body": body_text,
-                        "array_length": len(data)
+                        "array_length": len(data),
+                        "total_items_in_database": len(data),
+                        "first_items_preview": preview,
                     })
-                return json.dumps({"status_code": resp.status_code, "body": body_text})
+                # For error responses or dicts, return body text
+                return json.dumps({"status_code": resp.status_code, "body": resp.text[:5000]})
             except json.JSONDecodeError:
-                return json.dumps({"status_code": resp.status_code, "body": body_text})
+                return json.dumps({"status_code": resp.status_code, "body": resp.text[:5000]})
     except Exception as e:
         return json.dumps({"status_code": 0, "body": f"Error: {e}"})
 
@@ -126,7 +128,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative directory path from project root (e.g., 'wiki' or 'backend')"}       
+                    "path": {"type": "string", "description": "Relative directory path from project root (e.g., 'wiki' or 'backend')"}
                 },
                 "required": ["path"],
             },
@@ -136,7 +138,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Send an HTTP request to the deployed backend LMS API. Use this for data queries (item counts, scores, analytics) and system status checks. Returns JSON with status_code and body. For list endpoints like /items/, the body contains an array — count the array length to answer 'how many' questions.",
+            "description": "Send an HTTP request to the deployed backend LMS API. Use this for data queries (item counts, scores, analytics) and system status checks. Returns JSON with status_code and body. For list endpoints like /items/, the response includes 'total_items_in_database' — use that number directly as the answer.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -183,30 +185,46 @@ You are a helpful agent for a Learning Management Service (LMS) project. You ans
 - GET /analytics/top-learners?lab=lab-04 — top learners for a lab
 - POST /pipeline/sync — run ETL sync
 
-
 ## Strategy
 1. Wiki/documentation questions → read_file the exact wiki file from the topic map above. Set "source" to the wiki file path (e.g., "wiki/docker.md#clean-up-docker").
 2. "Read the [file]" questions → read_file that specific file directly (e.g., "Read the Dockerfile" → read_file("Dockerfile")).
 3. Codebase/architecture questions → read_file on the relevant source files.
-4. Data questions (counts, numbers) → query_api the right endpoint, then COUNT the array length in the response. For "How many items?" use GET /items/ and count the returned array length. State the exact number.
-5. Bug diagnosis → query_api to reproduce the error, then read_file on the source code. Check ALL endpoints in that file.
+4. Data questions (counts, numbers) → query_api the right endpoint, then read "total_items_in_database" or "array_length" from the response. State the exact number.
+5. Bug diagnosis → FIRST query_api to reproduce the error, THEN read_file the source code to find the bug. Always do BOTH steps.
 6. Comparison/reasoning questions → read the relevant source files, then give a structured answer.
 
+## Counting items in the database (CRITICAL)
+When asked "how many items/learners/interactions are in the database":
+1. Call query_api with method="GET" and the appropriate endpoint (e.g., path="/items/")
+2. The response JSON will contain "total_items_in_database" — use THAT number as your answer
+3. Answer: "There are N items currently stored in the database."
+4. Do NOT make additional tool calls — you already have the answer from the response.
+
+## Bug diagnosis workflow (CRITICAL)
+When asked about bugs, errors, or what happens when querying an endpoint with bad/nonexistent input:
+1. FIRST: query_api to call the endpoint and observe the error response (e.g., GET /analytics/completion-rate?lab=lab-99)
+2. SECOND: read_file("backend/app/routers/analytics.py") to examine the source code
+3. THIRD: Find the specific buggy line. Common bugs include:
+   - Division by zero: `x / total` where total could be 0 when no data exists
+   - Missing null/empty checks before arithmetic operations
+   - No guard clause for empty query results
+4. Report: the error message from the API, the file path, the exact buggy line/expression, and why it fails
+
 ## Important: After getting API response with an array
-- If the response body contains an array (e.g., from /items/, /learners/, /interactions/), COUNT the array length and state the number.
-- Do NOT make additional tool calls after receiving the array — you have the answer.
-- Example: GET /items/ returns [{"id":1,...}, {"id":2,...}, ...] → count items and answer "There are N items."
+- The response contains "total_items_in_database" with the exact count — use that number directly.
+- Do NOT make additional tool calls — you have the answer.
+- Example: response has "total_items_in_database": 42 → answer "There are 42 items."
 
 ## Bug Detection Checklist
 When asked about bugs or risky operations in code, systematically check for:
-- **Division operations**: Look for `/` or division that could cause divide-by-zero errors (e.g., `x / total` where total could be 0)        
+- **Division operations**: Look for `/` or division that could cause divide-by-zero errors (e.g., `x / total` where total could be 0)
 - **None-unsafe operations**: Sorting by values that could be None, accessing attributes on potentially None objects
 - **Missing error handling**: Code that doesn't catch exceptions or handle edge cases
 - **Type mismatches**: Operations that assume a type without checking
 
 ## Error Handling Comparison
 When comparing error handling between components:
-- **ETL pipeline**: Uses `raise_for_status()` which throws HTTPError on bad responses; exceptions propagate up; all-or-nothing approach      
+- **ETL pipeline**: Uses `raise_for_status()` which throws HTTPError on bad responses; exceptions propagate up; all-or-nothing approach
 - **API routers**: Return empty lists `[]` or default values on edge cases; graceful degradation; never crash on bad input
 
 ## Rules
@@ -262,7 +280,6 @@ def _execute_tool(name: str, arguments: dict) -> str:
 def _extract_source(answer: str, tool_calls: list[dict]) -> str | None:
     """Pick the best source file from tool calls.
 
-
     Heuristic: prefer wiki/ files mentioned in the answer, then fall back
     to the last read_file path, then None.
     """
@@ -302,10 +319,7 @@ def run_agent(question: str) -> dict:
         if not tool_calls:
             # Final answer
             answer = (response_msg.get("content") or "").strip()
-            # Extract source: prefer the most relevant read_file path
-            # (wiki file for wiki questions, last read_file otherwise)
             source = _extract_source(answer, all_tool_calls)
-            # Strip bulky result text — checker only needs tool names
             compact_calls = [
                 {"tool": tc["tool"], "args": tc["args"]}
                 for tc in all_tool_calls
@@ -332,7 +346,6 @@ def run_agent(question: str) -> dict:
                 "tool": fn_name,
                 "args": fn_args,
             })
-            # Cap tool output to avoid filling LLM context window
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
